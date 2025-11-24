@@ -12,7 +12,12 @@ export type AuthState = KartonContract['state']['userAccount'];
 
 const ACCESS_TOKEN_EXPIRATION_BUFFER_TIME = 10 * 60 * 1000; // We refresh the token 10 minutes before it expires to avoid any issues
 
+// Bypass AuthService for local development if env var is set
+const BYPASS_AUTH = process.env.STAGEWISE_BYPASS_AUTH === 'true' || process.env.STAGEWISE_BYPASS_AUTH === '1';
+
 export class AuthService {
+    // Bypass instance fields
+    private _bypassAuth: boolean = false;
   private globalDataPathService: GlobalDataPathService;
   private identifierService: IdentifierService;
   private kartonService: KartonService;
@@ -31,6 +36,7 @@ export class AuthService {
     kartonService: KartonService,
     notificationService: NotificationService,
     logger: Logger,
+    bypassAuth = true,
   ) {
     this.globalDataPathService = globalDataPathService;
     this.identifierService = identifierService;
@@ -38,9 +44,32 @@ export class AuthService {
     this.notificationService = notificationService;
     this.logger = logger;
     this.serverInterop = new AuthServerInterop(logger);
+    this._bypassAuth = bypassAuth;
   }
 
   private async initialize(): Promise<void> {
+    if (this._bypassAuth) {
+      // Set authenticated state immediately
+      this.kartonService.setState((draft) => {
+        draft.userAccount = {
+          status: 'authenticated',
+          machineId: this.identifierService.getMachineId(),
+          user: {
+            id: 'bypass-user',
+            email: 'bypass@stagewise.local',
+          },
+          subscription: {
+            active: true,
+            plan: 'bypass',
+            expiresAt: undefined,
+          },
+          loginDialog: null,
+        };
+      });
+      this.logger.info('[AuthService] BYPASS mode enabled: authentication is skipped.');
+      return;
+    }
+
     this.tokenStore = await AuthTokenStore.create(
       this.globalDataPathService,
       this.logger,
@@ -113,6 +142,18 @@ export class AuthService {
     notificationService: NotificationService,
     logger: Logger,
   ): Promise<AuthService> {
+    if (BYPASS_AUTH) {
+      const authService = new AuthService(
+        globalDataPathService,
+        identifierService,
+        kartonService,
+        notificationService,
+        logger,
+        true,
+      );
+      await authService.initialize();
+      return authService;
+    }
     const authService = new AuthService(
       globalDataPathService,
       identifierService,
@@ -125,8 +166,8 @@ export class AuthService {
   }
 
   public tearDown(): void {
+    if (this._bypassAuth) return;
     clearInterval(this._authStateCheckInterval!);
-
     this.kartonService.removeServerProcedureHandler('userAccount.logout');
     this.kartonService.removeServerProcedureHandler('userAccount.startLogin');
     this.kartonService.removeServerProcedureHandler('userAccount.abortLogin');
@@ -140,7 +181,6 @@ export class AuthService {
       'userAccount.cancelAuthenticationConfirmation',
     );
     this.authChangeCallbacks = [];
-
     this.logger.debug('[AuthService] Teared down auth service');
   }
 
@@ -148,6 +188,25 @@ export class AuthService {
   // Will be called every 10 minutes by default, but this function can also be call as soon as we think there may be some issue with auth.
   // It updates the karton state with latest information on auth.
   private async checkAuthState(): Promise<void> {
+    if (this._bypassAuth) {
+      this.kartonService.setState((draft) => {
+        draft.userAccount = {
+          status: 'authenticated',
+          machineId: this.identifierService.getMachineId(),
+          user: {
+            id: 'bypass-user',
+            email: 'bypass@stagewise.local',
+          },
+          subscription: {
+            active: true,
+            plan: 'bypass',
+            expiresAt: undefined,
+          },
+          loginDialog: null,
+        };
+      });
+      return;
+    }
     // Check if we have token data stored
     if (!this.tokenStore.tokenData?.accessToken) {
       // early exit, since there's no token stored anyway
@@ -279,6 +338,17 @@ export class AuthService {
   }
 
   public async logout(): Promise<void> {
+    if (this._bypassAuth) {
+      this.kartonService.setState((draft) => {
+        draft.userAccount = {
+          status: 'unauthenticated',
+          machineId: this.identifierService.getMachineId(),
+          loginDialog: null,
+        };
+      });
+      this.logger.info('[AuthService] BYPASS mode: logout called, state set to unauthenticated.');
+      return;
+    }
     if (!this.tokenStore.tokenData?.accessToken) {
       // early exit, since there's no token stored anyway
       return;
@@ -306,6 +376,26 @@ export class AuthService {
   }
 
   public async startLogin(): Promise<void> {
+    if (this._bypassAuth) {
+      this.kartonService.setState((draft) => {
+        draft.userAccount = {
+          status: 'authenticated',
+          machineId: this.identifierService.getMachineId(),
+          user: {
+            id: 'bypass-user',
+            email: 'bypass@stagewise.local',
+          },
+          subscription: {
+            active: true,
+            plan: 'bypass',
+            expiresAt: undefined,
+          },
+          loginDialog: null,
+        };
+      });
+      this.logger.info('[AuthService] BYPASS mode: startLogin called, state set to authenticated.');
+      return;
+    }
     // If the user is already authenticated, we just early exit
     if (this.authState.status !== 'unauthenticated') {
       return;
@@ -323,6 +413,7 @@ export class AuthService {
   }
 
   public async abortLogin(): Promise<void> {
+    if (this._bypassAuth) return;
     this.updateAuthState((draft) => {
       draft.userAccount = {
         ...draft.userAccount,
@@ -336,6 +427,7 @@ export class AuthService {
     authCode: string | undefined,
     error: string | undefined,
   ): Promise<void> {
+    if (this._bypassAuth) return;
     this.updateAuthState((draft) => {
       draft.userAccount = {
         ...draft.userAccount,
@@ -368,6 +460,7 @@ export class AuthService {
   }
 
   private async confirmAuthenticationConfirmation(): Promise<void> {
+    if (this._bypassAuth) return;
     this.logger.debug('[AuthService] User confirmed authentication');
     try {
       await this.authenticationConirmationCallback?.();
@@ -387,6 +480,7 @@ export class AuthService {
   }
 
   private async cancelAuthenticationConfirmation(): Promise<void> {
+    if (this._bypassAuth) return;
     this.logger.debug('[AuthService] User cancelled authentication');
     this.authenticationConirmationCallback = null;
     this.updateAuthState((draft) => {
@@ -398,29 +492,50 @@ export class AuthService {
   }
 
   public get authState(): AuthState {
+    if (this._bypassAuth) {
+      return {
+        status: 'authenticated',
+        machineId: this.identifierService.getMachineId(),
+        user: {
+          id: 'bypass-user',
+          email: 'bypass@stagewise.local',
+        },
+        subscription: {
+          active: true,
+          plan: 'bypass',
+          expiresAt: undefined,
+        },
+        loginDialog: null,
+      };
+    }
     // We store everything in karton and just report it here. Makes it easier and reduces redundancy...
     return this.kartonService.state.userAccount;
   }
 
   public get accessToken(): string | undefined {
+    if (this._bypassAuth) return 'bypass-access-token';
     return this.tokenStore.tokenData?.accessToken;
   }
 
   public async refreshAuthState(): Promise<AuthState> {
+    if (this._bypassAuth) {
+      return this.authState;
+    }
     await this.checkAuthState();
     return this.authState;
   }
 
   private getAuthUrl(): string {
+    if (this._bypassAuth) return 'http://localhost/bypass-auth';
     const runningPort = this.kartonService.state.appInfo.runningOnPort;
     const callbackUrl = `http://localhost:${runningPort}${stagewiseAppPrefix}/auth/callback`;
-
     return `${consoleUrl}/authenticate-ide?ide=cli&redirect_uri=${encodeURIComponent(callbackUrl)}&no-cookie-banner=true`;
   }
 
   private updateAuthState(
     draft: Parameters<typeof this.kartonService.setState>[0],
   ): void {
+    if (this._bypassAuth) return;
     const oldState = structuredClone(this.kartonService.state.userAccount);
     this.kartonService.setState(draft);
     const newState = this.kartonService.state.userAccount;
@@ -438,12 +553,14 @@ export class AuthService {
   public registerAuthStateChangeCallback(
     callback: (newAuthState: AuthState) => void,
   ): void {
+    if (this._bypassAuth) return;
     this.authChangeCallbacks.push(callback);
   }
 
   public unregisterAuthStateChangeCallback(
     callback: (newAuthState: AuthState) => void,
   ): void {
+    if (this._bypassAuth) return;
     this.authChangeCallbacks = this.authChangeCallbacks.filter(
       (c) => c !== callback,
     );

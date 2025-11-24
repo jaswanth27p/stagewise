@@ -121,7 +121,7 @@ export class TelemetryService {
   private globalConfigService: GlobalConfigService;
   private logger: Logger;
   private userProperties: UserProperties = {};
-  public posthogClient: PostHog;
+  public posthogClient: PostHog | null;
 
   public constructor(
     identifierService: IdentifierService,
@@ -131,17 +131,20 @@ export class TelemetryService {
     this.identifierService = identifierService;
     this.globalConfigService = globalConfigService;
     this.logger = logger;
-    const apiKey = process.env.POSTHOG_API_KEY ?? '';
-    this.posthogClient = new PostHog(apiKey, {
-      host: process.env.POSTHOG_HOST || 'https://eu.i.posthog.com',
-      flushAt: 1,
-      flushInterval: 0,
-      disabled:
-        this.globalConfigService.get().telemetryLevel === 'off' ||
-        process.env.POSTHOG_API_KEY === undefined,
-    });
+    const apiKey = process.env.POSTHOG_API_KEY;
+    if (apiKey) {
+      this.posthogClient = new PostHog(apiKey, {
+        host: process.env.POSTHOG_HOST || 'https://eu.i.posthog.com',
+        flushAt: 1,
+        flushInterval: 0,
+        disabled: this.globalConfigService.get().telemetryLevel === 'off',
+      });
 
-    this.identifyUser();
+      this.identifyUser();
+    } else {
+      this.posthogClient = null;
+      logger.debug('[TelemetryService] No PostHog API key provided; telemetry disabled');
+    }
 
     this.globalConfigService.addConfigUpdatedListener(
       (newConfig, oldConfig) => {
@@ -253,7 +256,7 @@ export class TelemetryService {
     properties?: Record<string, any>,
   ): void {
     const telemetryLevel = this.globalConfigService.get().telemetryLevel;
-    if (telemetryLevel === 'off') return;
+    if (telemetryLevel === 'off' || !this.posthogClient) return;
     const distinctId = this.getDistinctId();
 
     this.posthogClient.captureException(error, distinctId, {
